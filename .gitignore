@@ -1,0 +1,6 @@
+*.zip
+*.log
+*.tar.gz
+*.tar.xz
+out/
+build/
