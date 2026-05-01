@@ -1,307 +1,435 @@
-name: Build Samsung A35 Kernel SM-A356E
+name: "🔨 Build A35 Kernel + KernelSU"
 
 on:
-  push:
-    branches: [ main ]
   workflow_dispatch:
     inputs:
-      enable_ksu:
-        description: 'Enable KernelSU?'
+      UPLOAD_RELEASE:
+        description: "رفع كـ GitHub Release؟"
         required: true
-        default: 'true'
-        type: choice
-        options:
-          - 'true'
-          - 'false'
-      enable_nuke_rkp:
-        description: 'Nuke Samsung Anti-Root?'
-        required: true
-        default: 'true'
-        type: choice
-        options:
-          - 'true'
-          - 'false'
+        default: "true"
+        type: boolean
+      CLEAN_BUILD:
+        description: "بناء نظيف؟ (بيمسح الـ cache)"
+        required: false
+        default: "false"
+        type: boolean
 
 env:
-  KERNEL_SOURCE: "https://github.com/ravindu644/android_kernel_samsung_a35x"
-  KERNEL_BRANCH: "main"
-  ARCH: "arm64"
-  DEFCONFIG: "exynos1380-a35x_defconfig"
-  TARGET_SOC: "exynos1380"
-  PLATFORM_VERSION: "15"
-  ANDROID_MAJOR_VERSION: "v"
-  CLANG_URL: "https://github.com/ravindu644/Android-Kernel-Tutorials/releases/download/toolchains/clang-r416183b.tar.gz"
-  GCC_URL: "https://github.com/ravindu644/Android-Kernel-Tutorials/releases/download/toolchains/arm-gnu-toolchain-14.2.rel1-x86_64-aarch64-none-linux-gnu.tar.xz"
+  # ── معلومات الجهاز ──────────────────────────────
+  DEVICE:          "SM-A356E"
+  DEVICE_CODENAME: "a35x"
+  SOC:             "s5e8835"
+  DEFCONFIG:       "s5e8835-a35xjvxx_defconfig"
+  ARCH:            "arm64"
+
+  # ── الكيرنل ─────────────────────────────────────
+  KERNEL_REPO:     "https://github.com/physwizz/A356e-U-u4-V-u4"
+  KERNEL_BRANCH:   "main"
+  PLATFORM_VER:    "15"
+  ANDROID_VER:     "v"
+
+  # ── KernelSU ────────────────────────────────────
+  KSU_REPO:        "https://github.com/rsuntk/KernelSU"
+  KSU_BRANCH:      "susfs-rksu-master"
+
+  # ── Toolchain (Proton Clang - أسرع وأثبت في Actions) ──
+  CLANG_REPO:      "https://github.com/kdrag0n/proton-clang"
+  CLANG_BRANCH:    "master"
+
+  # ── AnyKernel3 ──────────────────────────────────
+  AK3_REPO:        "https://github.com/osm0sis/AnyKernel3"
+  AK3_BRANCH:      "master"
 
 jobs:
   build:
-    name: SM-A356E Kernel Build
+    name: "Build Kernel"
     runs-on: ubuntu-22.04
+    timeout-minutes: 180
 
     steps:
 
-    # ══════════════════════════════════════════
-    # 1 - Checkout
-    # ══════════════════════════════════════════
-    - name: Checkout Repository
-      uses: actions/checkout@v4
-
-    # ══════════════════════════════════════════
-    # 2 - Install Dependencies
-    # ══════════════════════════════════════════
-    - name: Install Build Dependencies
+    # ════════════════════════════════════════════════
+    # 1. تهيئة البيئة
+    # ════════════════════════════════════════════════
+    - name: "⚙️ Setup Environment"
       run: |
-        sudo apt-get update -y
-        sudo apt-get install -y \
-          git curl wget \
-          build-essential \
+        echo "BUILD_DATE=$(date +%Y%m%d)" >> $GITHUB_ENV
+        echo "BUILD_TIME=$(date +%H%M%S)" >> $GITHUB_ENV
+        echo "KERNEL_DIR=$GITHUB_WORKSPACE/kernel" >> $GITHUB_ENV
+        echo "CLANG_DIR=$GITHUB_WORKSPACE/clang" >> $GITHUB_ENV
+        echo "OUT_DIR=$GITHUB_WORKSPACE/out" >> $GITHUB_ENV
+        echo "AK3_DIR=$GITHUB_WORKSPACE/AnyKernel3" >> $GITHUB_ENV
+
+        echo "════════════════════════════════════"
+        echo "  Samsung A35 5G Kernel Builder"
+        echo "  Device  : ${{ env.DEVICE }}"
+        echo "  Android : ${{ env.PLATFORM_VER }}"
+        echo "  SOC     : ${{ env.SOC }}"
+        echo "════════════════════════════════════"
+
+    # ════════════════════════════════════════════════
+    # 2. تثبيت الحزم
+    # ════════════════════════════════════════════════
+    - name: "📦 Install Dependencies"
+      run: |
+        sudo apt-get update -qq
+        sudo apt-get install -y --no-install-recommends \
+          git curl wget zip unzip tar \
+          build-essential bc bison flex \
           libssl-dev libelf-dev \
-          bison flex \
-          python3 python-is-python3 \
-          bc cpio kmod \
-          zip unzip lz4 \
-          device-tree-compiler \
-          libncurses-dev \
-          pahole openssl \
-          zstd rsync \
-          p7zip-full ccache
-        echo "Dependencies installed"
+          python3 python3-pip \
+          gcc-aarch64-linux-gnu \
+          gcc-arm-linux-gnueabi \
+          binutils-aarch64-linux-gnu \
+          cpio lz4 lzop zstd \
+          ccache
+        echo "✅ Dependencies ready"
 
-    # ══════════════════════════════════════════
-    # 3 - Download Toolchains
-    # ══════════════════════════════════════════
-    - name: Download Toolchains
-      run: |
-        mkdir -p $HOME/toolchains/clang
-        mkdir -p $HOME/toolchains/gcc
-        echo "Downloading Clang for kernel 5.15..."
-        wget -q "${{ env.CLANG_URL }}" -O /tmp/clang.tar.gz
-        tar -xzf /tmp/clang.tar.gz -C $HOME/toolchains/clang --strip-components=1
-        echo "Downloading GCC..."
-        wget -q "${{ env.GCC_URL }}" -O /tmp/gcc.tar.xz
-        tar -xJf /tmp/gcc.tar.xz -C $HOME/toolchains/gcc --strip-components=1
-        echo "$HOME/toolchains/clang/bin" >> $GITHUB_PATH
-        echo "$HOME/toolchains/gcc/bin" >> $GITHUB_PATH
-        $HOME/toolchains/clang/bin/clang --version | head -1
-        echo "Toolchains ready"
+    # ════════════════════════════════════════════════
+    # 3. Cache الـ Clang Toolchain
+    # ════════════════════════════════════════════════
+    - name: "💾 Cache Clang Toolchain"
+      id: cache-clang
+      uses: actions/cache@v4
+      with:
+        path: ${{ github.workspace }}/clang
+        key: proton-clang-master-v3
+        restore-keys: proton-clang-master-
 
-    # ══════════════════════════════════════════
-    # 4 - Clone Kernel Source
-    # ══════════════════════════════════════════
-    - name: Clone Kernel Source
+    # ════════════════════════════════════════════════
+    # 4. تحميل Proton Clang (لو مش في الـ cache)
+    # ════════════════════════════════════════════════
+    - name: "🔧 Download Proton Clang"
+      if: steps.cache-clang.outputs.cache-hit != 'true'
       run: |
-        echo "Cloning Samsung A35 kernel source..."
+        echo "[*] Cloning Proton Clang (first time only)..."
         git clone --depth=1 \
-          --branch "${{ env.KERNEL_BRANCH }}" \
-          "${{ env.KERNEL_SOURCE }}" \
-          kernel
-        chmod -R 755 kernel/
-        echo "Kernel version:"
-        make -C kernel kernelversion 2>/dev/null || true
-        echo "Available defconfigs:"
-        ls kernel/arch/arm64/configs/ | grep -i "a35\|exynos1380" || true
+          --branch ${{ env.CLANG_BRANCH }} \
+          ${{ env.CLANG_REPO }} \
+          $GITHUB_WORKSPACE/clang
+        echo "✅ Clang ready"
 
-    # ══════════════════════════════════════════
-    # 5 - Nuke Samsung Anti-Root
-    # ══════════════════════════════════════════
-    - name: Nuke Samsung Anti-Root Protections
-      if: ${{ github.event.inputs.enable_nuke_rkp == 'true' || github.event_name == 'push' }}
+    - name: "✅ Verify Clang"
       run: |
-        cd kernel
-        echo "Disabling RKP / DEFEX / FIVE / Knox..."
-        find . -name "Kconfig" | xargs grep -l "RKP\|DEFEX\|SEC_RESTRICT_ROOTING\|FIVE\|UH_RKP" 2>/dev/null | while read f; do
-          sed -i 's/^\(\s*default\s*\)y/\1n/g' "$f" 2>/dev/null || true
-        done
-        CONFIG_FILE="arch/arm64/configs/${{ env.DEFCONFIG }}"
-        if [ -f "$CONFIG_FILE" ]; then
-          echo "" >> "$CONFIG_FILE"
-          echo "# Samsung Anti-Root Disabled" >> "$CONFIG_FILE"
-          echo "# CONFIG_RKP_CFP_JOPP is not set" >> "$CONFIG_FILE"
-          echo "# CONFIG_RKP_CFP_ROPP is not set" >> "$CONFIG_FILE"
-          echo "# CONFIG_SECURITY_DEFEX is not set" >> "$CONFIG_FILE"
-          echo "# CONFIG_SEC_RESTRICT_ROOTING is not set" >> "$CONFIG_FILE"
-          echo "# CONFIG_UH_RKP is not set" >> "$CONFIG_FILE"
-          echo "# CONFIG_FIVE is not set" >> "$CONFIG_FILE"
-          echo "# CONFIG_GAF_V6 is not set" >> "$CONFIG_FILE"
-          echo "Anti-root disabled in defconfig"
-        else
-          echo "Defconfig not found, will apply via custom.config"
+        $GITHUB_WORKSPACE/clang/bin/clang --version
+
+    # ════════════════════════════════════════════════
+    # 5. كلون سورس الكيرنل
+    # ════════════════════════════════════════════════
+    - name: "📥 Clone Kernel Source"
+      run: |
+        echo "[*] Cloning physwizz A356E kernel (Android 15)..."
+        git clone --depth=1 \
+          --branch ${{ env.KERNEL_BRANCH }} \
+          ${{ env.KERNEL_REPO }} \
+          $GITHUB_WORKSPACE/kernel
+
+        cd $GITHUB_WORKSPACE/kernel
+        KVER=$(make kernelversion 2>/dev/null || echo "5.15.x")
+        echo "KERNEL_VER=$KVER" >> $GITHUB_ENV
+        echo "✅ Kernel source ready — version: $KVER"
+
+    # ════════════════════════════════════════════════
+    # 6. دمج KernelSU (بدون setup.sh - أكثر موثوقية)
+    # ════════════════════════════════════════════════
+    - name: "🔑 Integrate KernelSU + SUSFS"
+      run: |
+        cd $GITHUB_WORKSPACE/kernel
+
+        echo "[*] Cloning KernelSU rsuntk/susfs-rksu-master..."
+        git clone --depth=1 \
+          --branch ${{ env.KSU_BRANCH }} \
+          ${{ env.KSU_REPO }} \
+          KernelSU
+
+        # ── ربط KernelSU بمجلد drivers ──
+        echo "[*] Linking KernelSU..."
+        ln -sf "../KernelSU/kernel" drivers/kernelsu
+
+        # ── إضافة للـ Makefile ──
+        if ! grep -q "kernelsu" drivers/Makefile 2>/dev/null; then
+          echo 'obj-$(CONFIG_KSU) += kernelsu/' >> drivers/Makefile
+          echo "  Added to drivers/Makefile"
         fi
 
-    # ══════════════════════════════════════════
-    # 6 - Integrate KernelSU
-    # ══════════════════════════════════════════
-    - name: Integrate KernelSU
-      if: ${{ github.event.inputs.enable_ksu == 'true' || github.event_name == 'push' }}
-      run: |
-        cd kernel
-        echo "Applying KernelSU patch..."
-        curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash -
-        echo "KernelSU integrated"
+        # ── إضافة للـ Kconfig ──
+        if ! grep -q "kernelsu" drivers/Kconfig 2>/dev/null; then
+          sed -i '/endmenu/i source "drivers/kernelsu/Kconfig"' drivers/Kconfig
+          echo "  Added to drivers/Kconfig"
+        fi
 
-    # ══════════════════════════════════════════
-    # 7 - Generate .config
-    # ══════════════════════════════════════════
-    - name: Generate Kernel Config
+        # ── إصدار KernelSU ──
+        KSU_VER=$(grep "^KERNELSU_VERSION" KernelSU/kernel/Makefile 2>/dev/null | awk '{print $3}' || echo "unknown")
+        echo "KSU_VER=$KSU_VER" >> $GITHUB_ENV
+        echo "✅ KernelSU integrated — version: $KSU_VER"
+
+    # ════════════════════════════════════════════════
+    # 7. تحضير AnyKernel3
+    # ════════════════════════════════════════════════
+    - name: "📦 Setup AnyKernel3"
       run: |
-        cd kernel
-        sed -i '/REAL_CC\|CFP_CC/d' Makefile 2>/dev/null || true
-        make \
-          ARCH=${{ env.ARCH }} \
-          CC=clang \
-          CROSS_COMPILE=aarch64-none-linux-gnu- \
-          CLANG_TRIPLE=aarch64-none-linux-gnu- \
-          TARGET_SOC=${{ env.TARGET_SOC }} \
-          PLATFORM_VERSION=${{ env.PLATFORM_VERSION }} \
-          ANDROID_MAJOR_VERSION=${{ env.ANDROID_MAJOR_VERSION }} \
+        git clone --depth=1 \
+          --branch ${{ env.AK3_BRANCH }} \
+          ${{ env.AK3_REPO }} \
+          $GITHUB_WORKSPACE/AnyKernel3
+
+        # anykernel.sh مضبوط للـ A356E
+        cat > $GITHUB_WORKSPACE/AnyKernel3/anykernel.sh << 'AKEOF'
+# AnyKernel3 — Samsung A35 5G (A356E)
+properties() { '
+kernel.string=A35 KernelSU | Android 15 | physwizz
+do.devicecheck=1
+do.modules=0
+do.systemless=1
+do.cleanup=1
+do.cleanuponabort=0
+device.name1=a35x
+device.name2=a35xq
+device.name3=a35xnsxx
+device.name4=SM-A356E
+device.name5=SM-A356B
+'; }
+
+block=/dev/block/platform/13100000.ufs/by-name/boot;
+is_slot_device=0;
+ramdisk_compression=auto;
+patch_vbmeta_flag=auto;
+
+. tools/ak3-core.sh;
+split_boot;
+flash_boot;
+AKEOF
+
+        echo "✅ AnyKernel3 ready for A356E"
+
+    # ════════════════════════════════════════════════
+    # 8. Cache ccache (يسرّع الـ rebuild التالي)
+    # ════════════════════════════════════════════════
+    - name: "⚡ Cache ccache"
+      if: ${{ github.event.inputs.CLEAN_BUILD != 'true' }}
+      uses: actions/cache@v4
+      with:
+        path: ~/.ccache
+        key: ccache-a35-${{ env.BUILD_DATE }}
+        restore-keys: ccache-a35-
+
+    # ════════════════════════════════════════════════
+    # 9. البناء الكامل
+    # ════════════════════════════════════════════════
+    - name: "🔨 Build Kernel"
+      run: |
+        CLANG=$GITHUB_WORKSPACE/clang
+        KERNEL=$GITHUB_WORKSPACE/kernel
+        OUT=$GITHUB_WORKSPACE/out
+        mkdir -p $OUT
+
+        # ── إعداد ccache ──
+        export CCACHE_DIR=~/.ccache
+        export CCACHE_MAXSIZE=5G
+        if command -v ccache &>/dev/null; then
+          ccache -z
+          CCACHE_PREFIX="ccache "
+        fi
+
+        # ── متغيرات البيئة ──
+        export PATH="$CLANG/bin:$PATH"
+        export ARCH=arm64
+        export SUBARCH=arm64
+        export PLATFORM_VERSION=${{ env.PLATFORM_VER }}
+        export ANDROID_MAJOR_VERSION=${{ env.ANDROID_VER }}
+        export TARGET_SOC=${{ env.SOC }}
+        export LLVM=1
+        export LLVM_IAS=1
+        export DEPMOD=depmod
+        export DTC_FLAGS="-@"
+        export KBUILD_BUILD_USER="GH-Actions"
+        export KBUILD_BUILD_HOST="A356E-Builder"
+
+        cd $KERNEL
+
+        # ━━━ defconfig ━━━
+        echo ""
+        echo "━━━ [1/4] Generating defconfig ━━━"
+        make O=$OUT ARCH=arm64 \
+          CC="${CCACHE_PREFIX}clang" \
+          CLANG_TRIPLE=aarch64-linux-gnu- \
+          CROSS_COMPILE=aarch64-linux-gnu- \
+          CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
+          LLVM=1 LLVM_IAS=1 \
           ${{ env.DEFCONFIG }}
-        echo "Config generated successfully"
 
-    # ══════════════════════════════════════════
-    # 8 - Apply Custom Config
-    # ══════════════════════════════════════════
-    - name: Apply Custom Config
-      run: |
-        cd kernel
-        echo "CONFIG_KSU=y" > custom.config
-        echo "# CONFIG_MODVERSIONS is not set" >> custom.config
-        echo "# CONFIG_MODULE_SIG is not set" >> custom.config
-        echo "# CONFIG_MODULE_SIG_FORCE is not set" >> custom.config
-        echo "# CONFIG_RKP_CFP_JOPP is not set" >> custom.config
-        echo "# CONFIG_RKP_CFP_ROPP is not set" >> custom.config
-        echo "# CONFIG_SECURITY_DEFEX is not set" >> custom.config
-        echo "# CONFIG_SEC_RESTRICT_ROOTING is not set" >> custom.config
-        echo "# CONFIG_UH_RKP is not set" >> custom.config
-        echo "# CONFIG_FIVE is not set" >> custom.config
-        echo "CONFIG_CPU_FREQ_GOV_PERFORMANCE=y" >> custom.config
-        echo "CONFIG_CPU_FREQ_GOV_SCHEDUTIL=y" >> custom.config
-        echo "CONFIG_CPU_FREQ_GOV_CONSERVATIVE=y" >> custom.config
-        echo "CONFIG_CPU_FREQ_DEFAULT_GOV_SCHEDUTIL=y" >> custom.config
-        echo "CONFIG_IOSCHED_CFQ=y" >> custom.config
-        echo "CONFIG_IOSCHED_DEADLINE=y" >> custom.config
-        echo "CONFIG_BTRFS_FS=y" >> custom.config
-        echo "CONFIG_F2FS_FS=y" >> custom.config
-        echo "CONFIG_NTFS_FS=y" >> custom.config
-        echo "CONFIG_IKCONFIG=y" >> custom.config
-        echo "CONFIG_IKCONFIG_PROC=y" >> custom.config
-        if [ -f "scripts/kconfig/merge_config.sh" ]; then
-          KCONFIG_CONFIG=.config scripts/kconfig/merge_config.sh -m .config custom.config
-        else
-          cat custom.config >> .config
-        fi
-        echo "Custom config applied"
+        # ━━━ KernelSU + SUSFS configs ━━━
+        echo ""
+        echo "━━━ [2/4] Applying KernelSU + SUSFS configs ━━━"
+        CFG="$OUT/.config"
 
-    # ══════════════════════════════════════════
-    # 9 - Compile Kernel
-    # ══════════════════════════════════════════
-    - name: Compile Kernel
-      run: |
-        cd kernel
-        JOBS=$(nproc --all)
-        echo "Building with $JOBS cores - SM-A356E | Android 15 | Kernel 5.15"
-        make -j$JOBS \
-          ARCH=${{ env.ARCH }} \
-          CC=clang \
-          CROSS_COMPILE=aarch64-none-linux-gnu- \
-          CLANG_TRIPLE=aarch64-none-linux-gnu- \
-          TARGET_SOC=${{ env.TARGET_SOC }} \
-          PLATFORM_VERSION=${{ env.PLATFORM_VERSION }} \
-          ANDROID_MAJOR_VERSION=${{ env.ANDROID_MAJOR_VERSION }} \
-          2>&1 | tee ../build.log
-        if [ -f "arch/arm64/boot/Image" ]; then
-          echo "SUCCESS - Image built"
-          ls -lh arch/arm64/boot/Image
-        elif [ -f "arch/arm64/boot/Image.gz" ]; then
-          echo "SUCCESS - Image.gz built"
-          ls -lh arch/arm64/boot/Image.gz
-        else
-          echo "FAILED - no kernel image found"
-          tail -80 ../build.log
+        _kset() {
+          sed -i "/^${1}[= ]/d" "$CFG"
+          sed -i "/^# ${1} is not set/d" "$CFG"
+          echo "${1}=${2}" >> "$CFG"
+        }
+
+        _kset CONFIG_KSU                                          y
+        _kset CONFIG_KSU_DEBUG                                    n
+        _kset CONFIG_KSU_SUSFS                                    y
+        _kset CONFIG_KSU_SUSFS_SUS_PATH                           y
+        _kset CONFIG_KSU_SUSFS_SUS_MOUNT                          y
+        _kset CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT     y
+        _kset CONFIG_KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT            y
+        _kset CONFIG_KSU_SUSFS_SUS_KSTAT                          y
+        _kset CONFIG_KSU_SUSFS_SUS_OVERLAYFS                      n
+        _kset CONFIG_KSU_SUSFS_TRY_UMOUNT                         y
+        _kset CONFIG_KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT y
+        _kset CONFIG_KSU_SUSFS_SPOOF_UNAME                        y
+        _kset CONFIG_KSU_SUSFS_ENABLE_LOG                         y
+        _kset CONFIG_KSU_SUSFS_OPEN_REDIRECT                      y
+        _kset CONFIG_KSU_SUSFS_SUS_SU                             n
+
+        make O=$OUT ARCH=arm64 \
+          CC="${CCACHE_PREFIX}clang" \
+          CLANG_TRIPLE=aarch64-linux-gnu- \
+          CROSS_COMPILE=aarch64-linux-gnu- \
+          LLVM=1 LLVM_IAS=1 \
+          olddefconfig 2>/dev/null
+
+        # ━━━ تحقق من الـ configs ━━━
+        echo ""
+        echo "━━━ [3/4] Verifying configs ━━━"
+        grep "CONFIG_KSU="      $OUT/.config && echo "  ✅ KSU enabled"      || echo "  ❌ KSU MISSING"
+        grep "CONFIG_KSU_SUSFS=" $OUT/.config && echo "  ✅ SUSFS enabled"   || echo "  ❌ SUSFS MISSING"
+
+        # ━━━ Build ━━━
+        echo ""
+        echo "━━━ [4/4] Building kernel ($(nproc) threads) ━━━"
+        START=$(date +%s)
+
+        make -j$(nproc) \
+          O=$OUT \
+          ARCH=arm64 \
+          CC="${CCACHE_PREFIX}clang" \
+          CLANG_TRIPLE=aarch64-linux-gnu- \
+          CROSS_COMPILE=aarch64-linux-gnu- \
+          CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
+          LLVM=1 \
+          LLVM_IAS=1 \
+          2>&1 | tee $GITHUB_WORKSPACE/build.log
+
+        END=$(date +%s)
+        MINS=$(( (END-START)/60 ))
+        SECS=$(( (END-START)%60 ))
+        echo "BUILD_ELAPSED=${MINS}m ${SECS}s" >> $GITHUB_ENV
+
+        # ccache stats
+        command -v ccache &>/dev/null && ccache -s | grep -E "hit rate|cache hit|miss"
+
+        # تحقق من Image
+        if [ ! -f "$OUT/arch/arm64/boot/Image" ]; then
+          echo ""
+          echo "❌ BUILD FAILED — Image not found"
+          echo "Last errors:"
+          grep -i "error:" $GITHUB_WORKSPACE/build.log | tail -20
           exit 1
         fi
 
-    # ══════════════════════════════════════════
-    # 10 - Get magiskboot
-    # ══════════════════════════════════════════
-    - name: Setup magiskboot
-      run: |
-        echo "Downloading Magisk to extract magiskboot..."
-        wget -q "https://github.com/topjohnwu/Magisk/releases/latest/download/Magisk.apk" -O Magisk.apk
-        unzip -q Magisk.apk "lib/x86_64/libmagiskboot.so" -d magisk_tmp 2>/dev/null || true
-        if [ -f "magisk_tmp/lib/x86_64/libmagiskboot.so" ]; then
-          cp magisk_tmp/lib/x86_64/libmagiskboot.so ./magiskboot
-          chmod +x magiskboot
-          sudo cp magiskboot /usr/local/bin/magiskboot
-          echo "magiskboot ready"
-        else
-          echo "magiskboot extraction failed, boot.img step will be skipped"
-        fi
+        echo ""
+        echo "✅ Kernel built successfully in ${MINS}m ${SECS}s"
+        ls -lh $OUT/arch/arm64/boot/
 
-    # ══════════════════════════════════════════
-    # 11 - Package with AnyKernel3
-    # ══════════════════════════════════════════
-    - name: Package with AnyKernel3
+    # ════════════════════════════════════════════════
+    # 10. تجميع ZIP
+    # ════════════════════════════════════════════════
+    - name: "📦 Package Kernel ZIP"
       run: |
-        echo "Packaging with AnyKernel3..."
-        git clone --depth=1 https://github.com/osm0sis/AnyKernel3 AnyKernel3
-        if [ -f "kernel/arch/arm64/boot/Image" ]; then
-          cp kernel/arch/arm64/boot/Image AnyKernel3/
-        elif [ -f "kernel/arch/arm64/boot/Image.gz" ]; then
-          cp kernel/arch/arm64/boot/Image.gz AnyKernel3/
-        fi
-        find kernel/arch/arm64/boot/dts -name "*.dtb" 2>/dev/null | head -1 | xargs -I{} cp {} AnyKernel3/dtb 2>/dev/null || true
-        find kernel/arch/arm64/boot -name "dtbo.img" 2>/dev/null | xargs -I{} cp {} AnyKernel3/ 2>/dev/null || true
-        KSU_TAG=""
-        if [ "${{ github.event.inputs.enable_ksu }}" != "false" ]; then
-          KSU_TAG="-KSU"
-        fi
-        DATE=$(date +%Y%m%d-%H%M)
-        ZIP_NAME="SM-A356E-Kernel${KSU_TAG}-Android15-${DATE}.zip"
-        cd AnyKernel3
-        zip -r9 "../${ZIP_NAME}" . -x ".git/*" "README.md"
-        cd ..
-        echo "ZIP_NAME=${ZIP_NAME}" >> $GITHUB_ENV
-        echo "Package ready: ${ZIP_NAME}"
-        ls -lh "${ZIP_NAME}"
+        OUT=$GITHUB_WORKSPACE/out
+        AK3=$GITHUB_WORKSPACE/AnyKernel3
 
-    # ══════════════════════════════════════════
-    # 12 - Upload Kernel ZIP
-    # ══════════════════════════════════════════
-    - name: Upload Kernel ZIP
+        cp "$OUT/arch/arm64/boot/Image" "$AK3/"
+        [ -f "$OUT/arch/arm64/boot/dtb.img"  ] && cp "$OUT/arch/arm64/boot/dtb.img"  "$AK3/" && echo "✓ DTB"
+        [ -f "$OUT/arch/arm64/boot/dtbo.img" ] && cp "$OUT/arch/arm64/boot/dtbo.img" "$AK3/" && echo "✓ DTBO"
+
+        ZIP="A35_KSU_Android15_${{ env.BUILD_DATE }}-${{ env.BUILD_TIME }}.zip"
+        echo "ZIP_NAME=$ZIP" >> $GITHUB_ENV
+
+        cd "$AK3"
+        zip -r9 "$GITHUB_WORKSPACE/$ZIP" . \
+          -x "*.git*" -x "README.md" -x "*.DS_Store"
+
+        SIZE=$(du -sh "$GITHUB_WORKSPACE/$ZIP" | cut -f1)
+        echo "ZIP_SIZE=$SIZE" >> $GITHUB_ENV
+        echo "✅ ZIP ready: $ZIP ($SIZE)"
+
+    # ════════════════════════════════════════════════
+    # 11. رفع Artifact
+    # ════════════════════════════════════════════════
+    - name: "⬆️ Upload Artifact"
       uses: actions/upload-artifact@v4
       with:
-        name: SM-A356E-Kernel
-        path: "*.zip"
-        retention-days: 30
-
-    # ══════════════════════════════════════════
-    # 13 - Upload Build Log (always)
-    # ══════════════════════════════════════════
-    - name: Upload Build Log
-      if: always()
-      uses: actions/upload-artifact@v4
-      with:
-        name: build-log
-        path: build.log
+        name: "A35-KSU-${{ env.BUILD_DATE }}-${{ env.BUILD_TIME }}"
+        path: "${{ github.workspace }}/${{ env.ZIP_NAME }}"
         retention-days: 7
+        compression-level: 0
 
-    # ══════════════════════════════════════════
-    # 14 - Build Summary
-    # ══════════════════════════════════════════
-    - name: Build Summary
-      if: success()
+    # ════════════════════════════════════════════════
+    # 12. GitHub Release
+    # ════════════════════════════════════════════════
+    - name: "🚀 Create GitHub Release"
+      if: ${{ github.event.inputs.UPLOAD_RELEASE == 'true' }}
+      uses: softprops/action-gh-release@v2
+      with:
+        tag_name: "KSU-A15-${{ env.BUILD_DATE }}-${{ env.BUILD_TIME }}"
+        name: "A35 KernelSU | Android 15 | ${{ env.BUILD_DATE }}"
+        body: |
+          ## 📱 Samsung A35 5G — KernelSU Kernel
+
+          | | |
+          |---|---|
+          | **Device** | SM-A356E (a35x) |
+          | **Android** | 15 / One UI 7 |
+          | **Kernel** | ${{ env.KERNEL_VER }} |
+          | **KernelSU** | ${{ env.KSU_VER }} |
+          | **Build Time** | ${{ env.BUILD_ELAPSED }} |
+          | **ZIP Size** | ${{ env.ZIP_SIZE }} |
+
+          ## ✅ Features
+          - KernelSU (rsuntk fork) + SUSFS root hiding
+          - Samsung security disabled (physwizz)
+          - Android 15 / One UI 7 compatible
+
+          ## 📲 Flash
+          - **TWRP:** Flash ZIP → Wipe cache → Reboot
+          - **Odin:** Extract Image → Pack as boot.tar → Flash AP
+
+          ## 🔗 Sources
+          - [physwizz/A356e-U-u4-V-u4](https://github.com/physwizz/A356e-U-u4-V-u4)
+          - [rsuntk/KernelSU](https://github.com/rsuntk/KernelSU)
+          - [KernelSU Manager APK](https://github.com/rsuntk/KernelSU/releases)
+        files: "${{ github.workspace }}/${{ env.ZIP_NAME }}"
+        make_latest: true
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    # ════════════════════════════════════════════════
+    # 13. Build Log عند الفشل
+    # ════════════════════════════════════════════════
+    - name: "📋 Upload Log (on failure)"
+      if: failure()
+      uses: actions/upload-artifact@v4
+      with:
+        name: "FAILED-log-${{ env.BUILD_DATE }}"
+        path: "${{ github.workspace }}/build.log"
+        retention-days: 3
+
+    # ════════════════════════════════════════════════
+    # 14. ملخص
+    # ════════════════════════════════════════════════
+    - name: "📊 Summary"
+      if: always()
       run: |
-        echo "========================================"
-        echo "  BUILD SUCCESSFUL"
-        echo "========================================"
-        echo "  Device   : Samsung SM-A356E"
-        echo "  Android  : 15 - One UI 7.0"
-        echo "  Kernel   : 5.15 GKI 2.0"
-        echo "  Exynos   : 1380"
-        echo "  KernelSU : ${{ github.event.inputs.enable_ksu || 'true' }}"
-        echo "  Anti-Root: ${{ github.event.inputs.enable_nuke_rkp || 'true' }}"
-        echo "  Output   : ${{ env.ZIP_NAME }}"
-        echo "  Date     : $(date)"
-        echo "========================================"
-        echo "  Download: Actions > This Run > Artifacts"
-        echo "========================================"
+        echo "════════════════════════════════"
+        echo "  Device  : ${{ env.DEVICE }}"
+        echo "  Kernel  : ${{ env.KERNEL_VER }}"
+        echo "  KSU     : ${{ env.KSU_VER }}"
+        echo "  Time    : ${{ env.BUILD_ELAPSED }}"
+        echo "  ZIP     : ${{ env.ZIP_NAME }}"
+        echo "  Size    : ${{ env.ZIP_SIZE }}"
+        echo "════════════════════════════════"
