@@ -1,0 +1,355 @@
+name: 🔨 Build Samsung A35 Kernel (SM-A356E)
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+    inputs:
+      enable_ksu:
+        description: 'تفعيل KernelSU (روت)?'
+        required: true
+        default: 'true'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+      enable_nuke_rkp:
+        description: 'تعطيل حماية Samsung Anti-Root?'
+        required: true
+        default: 'true'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+
+env:
+  # ════════════════════════════════════════════
+  # ✅ مضبوط تلقائياً لـ SM-A356E
+  #    Android 15 / One UI 7.0 / Kernel 5.15
+  # ════════════════════════════════════════════
+
+  # سورس الكيرنل الرسمي من Samsung Opensource
+  KERNEL_SOURCE: "https://github.com/ravindu644/android_kernel_samsung_a35x"
+  KERNEL_BRANCH: "main"
+
+  # معلومات الجهاز - مستخرجة من الصورة
+  ARCH: "arm64"
+  DEFCONFIG: "exynos1380-a35x_defconfig"
+  TARGET_SOC: "exynos1380"
+  PLATFORM_VERSION: "15"
+  ANDROID_MAJOR_VERSION: "v"
+
+  # Toolchain مناسب لـ Kernel 5.15 (GKI 2.0)
+  CLANG_URL: "https://github.com/ravindu644/Android-Kernel-Tutorials/releases/download/toolchains/clang-r416183b.tar.gz"
+  GCC_URL: "https://github.com/ravindu644/Android-Kernel-Tutorials/releases/download/toolchains/arm-gnu-toolchain-14.2.rel1-x86_64-aarch64-none-linux-gnu.tar.xz"
+
+jobs:
+  build:
+    name: 🏗️ SM-A356E Kernel Build
+    runs-on: ubuntu-22.04
+
+    steps:
+
+    # ════════════════════════════════════════════
+    # 1️⃣ سحب الريبو
+    # ════════════════════════════════════════════
+    - name: 📥 Checkout Repository
+      uses: actions/checkout@v3
+
+    # ════════════════════════════════════════════
+    # 2️⃣ تثبيت الأدوات
+    # ════════════════════════════════════════════
+    - name: 📦 Install Build Dependencies
+      run: |
+        sudo apt-get update -y
+        sudo apt-get install -y \
+          git curl wget \
+          build-essential \
+          libssl-dev libelf-dev \
+          bison flex \
+          python3 python-is-python3 \
+          bc cpio kmod \
+          zip unzip lz4 \
+          device-tree-compiler \
+          libncurses-dev \
+          pahole openssl \
+          zstd rsync \
+          p7zip-full \
+          ccache
+        echo "✅ Dependencies installed"
+
+    # ════════════════════════════════════════════
+    # 3️⃣ تحميل Toolchains
+    # ════════════════════════════════════════════
+    - name: ⚙️ Download Toolchains
+      run: |
+        mkdir -p $HOME/toolchains/clang
+        mkdir -p $HOME/toolchains/gcc
+
+        echo "⬇️ Downloading Clang (for kernel 5.15)..."
+        wget -q --show-progress "${{ env.CLANG_URL }}" -O /tmp/clang.tar.gz
+        tar -xzf /tmp/clang.tar.gz -C $HOME/toolchains/clang --strip-components=1
+        echo "✅ Clang ready"
+
+        echo "⬇️ Downloading GCC..."
+        wget -q --show-progress "${{ env.GCC_URL }}" -O /tmp/gcc.tar.xz
+        tar -xJf /tmp/gcc.tar.xz -C $HOME/toolchains/gcc --strip-components=1
+        echo "✅ GCC ready"
+
+        echo "$HOME/toolchains/clang/bin" >> $GITHUB_PATH
+        echo "$HOME/toolchains/gcc/bin"   >> $GITHUB_PATH
+
+        echo "🔍 Clang version:"
+        $HOME/toolchains/clang/bin/clang --version | head -1
+
+    # ════════════════════════════════════════════
+    # 4️⃣ تحميل سورس الكيرنل
+    # ════════════════════════════════════════════
+    - name: 📂 Clone Kernel Source
+      run: |
+        echo "⬇️ Cloning Samsung A35 kernel source..."
+        git clone --depth=1 \
+          --branch "${{ env.KERNEL_BRANCH }}" \
+          "${{ env.KERNEL_SOURCE }}" \
+          kernel
+
+        chmod -R 755 kernel/
+        echo "✅ Kernel source ready"
+
+        echo "📋 Kernel version:"
+        make -C kernel kernelversion 2>/dev/null || true
+
+        echo "📋 Available defconfigs:"
+        ls kernel/arch/arm64/configs/ | grep -i "a35\|exynos1380" || true
+
+    # ════════════════════════════════════════════
+    # 5️⃣ نسف حماية Samsung Anti-Root
+    # ════════════════════════════════════════════
+    - name: 🔓 Nuke Samsung Anti-Root Protections
+      if: ${{ github.event.inputs.enable_nuke_rkp == 'true' || github.event_name == 'push' }}
+      run: |
+        cd kernel
+        echo "🔍 Nuking RKP / DEFEX / FIVE / Knox..."
+
+        # تعطيل في Kconfig
+        find . -name "Kconfig" | xargs grep -l \
+          "RKP\|DEFEX\|SEC_RESTRICT_ROOTING\|FIVE\|UH_RKP" 2>/dev/null | \
+        while read f; do
+          sed -i \
+            -e '/RKP\|DEFEX\|SEC_RESTRICT_ROOTING\|FIVE\|UH_RKP/{ /default y/s/default y/default n/ }' \
+            "$f" 2>/dev/null || true
+        done
+
+        # تعطيل في defconfig
+        CONFIG_FILE="arch/arm64/configs/${{ env.DEFCONFIG }}"
+        if [ -f "$CONFIG_FILE" ]; then
+          cat >> "$CONFIG_FILE" << 'ANTIROOT'
+
+# ===== Samsung Anti-Root Disabled =====
+# CONFIG_RKP_CFP_JOPP is not set
+# CONFIG_RKP_CFP_ROPP is not set
+# CONFIG_SECURITY_DEFEX is not set
+# CONFIG_SEC_RESTRICT_ROOTING is not set
+# CONFIG_UH_RKP is not set
+# CONFIG_FIVE is not set
+# CONFIG_GAF_V6 is not set
+ANTIROOT
+          echo "✅ Anti-root disabled in: $CONFIG_FILE"
+        else
+          echo "⚠️ Defconfig not found, will apply via custom.config"
+        fi
+
+    # ════════════════════════════════════════════
+    # 6️⃣ تطبيق KernelSU
+    # ════════════════════════════════════════════
+    - name: 🔑 Integrate KernelSU
+      if: ${{ github.event.inputs.enable_ksu == 'true' || github.event_name == 'push' }}
+      run: |
+        cd kernel
+        echo "🔑 Applying KernelSU patch..."
+        curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash -
+        echo "✅ KernelSU integrated"
+        echo "📋 KernelSU version:"
+        cat KernelSU/kernel/Makefile 2>/dev/null | grep "^KSUVER" | head -1 || true
+
+    # ════════════════════════════════════════════
+    # 7️⃣ توليد .config
+    # ════════════════════════════════════════════
+    - name: 🛠️ Generate Kernel Config
+      run: |
+        cd kernel
+
+        # إزالة wrapper لو موجود (مشكلة شائعة في Samsung)
+        sed -i '/REAL_CC\|CFP_CC\|wrapper/d' Makefile 2>/dev/null || true
+
+        make \
+          ARCH=${{ env.ARCH }} \
+          CC=clang \
+          CROSS_COMPILE=aarch64-none-linux-gnu- \
+          CLANG_TRIPLE=aarch64-none-linux-gnu- \
+          TARGET_SOC=${{ env.TARGET_SOC }} \
+          PLATFORM_VERSION=${{ env.PLATFORM_VERSION }} \
+          ANDROID_MAJOR_VERSION=${{ env.ANDROID_MAJOR_VERSION }} \
+          ${{ env.DEFCONFIG }}
+
+        echo "✅ .config generated"
+
+    # ════════════════════════════════════════════
+    # 8️⃣ دمج custom.config
+    # ════════════════════════════════════════════
+    - name: ⚙️ Apply Custom Config
+      run: |
+        cd kernel
+
+        cat > custom.config << 'EOF'
+# ===== KernelSU =====
+CONFIG_KSU=y
+
+# ===== Fix Module Loading =====
+# CONFIG_MODVERSIONS is not set
+# CONFIG_MODULE_SIG is not set
+# CONFIG_MODULE_SIG_FORCE is not set
+
+# ===== Disable Anti-Root (backup) =====
+# CONFIG_RKP_CFP_JOPP is not set
+# CONFIG_RKP_CFP_ROPP is not set
+# CONFIG_SECURITY_DEFEX is not set
+# CONFIG_SEC_RESTRICT_ROOTING is not set
+# CONFIG_UH_RKP is not set
+# CONFIG_FIVE is not set
+
+# ===== CPU Governors =====
+CONFIG_CPU_FREQ_GOV_PERFORMANCE=y
+CONFIG_CPU_FREQ_GOV_SCHEDUTIL=y
+CONFIG_CPU_FREQ_GOV_CONSERVATIVE=y
+CONFIG_CPU_FREQ_DEFAULT_GOV_SCHEDUTIL=y
+
+# ===== IO Schedulers =====
+CONFIG_IOSCHED_CFQ=y
+CONFIG_IOSCHED_DEADLINE=y
+
+# ===== Extra Filesystems =====
+CONFIG_BTRFS_FS=y
+CONFIG_F2FS_FS=y
+CONFIG_NTFS_FS=y
+
+# ===== Fix "internal problem" =====
+CONFIG_IKCONFIG=y
+CONFIG_IKCONFIG_PROC=y
+EOF
+
+        # دمج مع .config
+        if [ -f "scripts/kconfig/merge_config.sh" ]; then
+          KCONFIG_CONFIG=.config \
+            scripts/kconfig/merge_config.sh -m .config custom.config
+        else
+          cat custom.config >> .config
+        fi
+
+        echo "✅ Custom config merged"
+
+    # ════════════════════════════════════════════
+    # 9️⃣ بناء الكيرنل
+    # ════════════════════════════════════════════
+    - name: 🔨 Compile Kernel
+      run: |
+        cd kernel
+        JOBS=$(nproc --all)
+        echo "🚀 Compiling with $JOBS cores..."
+        echo "📋 Device: SM-A356E | Android 15 | Kernel 5.15"
+
+        make -j$JOBS \
+          ARCH=${{ env.ARCH }} \
+          CC=clang \
+          CROSS_COMPILE=aarch64-none-linux-gnu- \
+          CLANG_TRIPLE=aarch64-none-linux-gnu- \
+          TARGET_SOC=${{ env.TARGET_SOC }} \
+          PLATFORM_VERSION=${{ env.PLATFORM_VERSION }} \
+          ANDROID_MAJOR_VERSION=${{ env.ANDROID_MAJOR_VERSION }} \
+          2>&1 | tee ../build.log
+
+        echo ""
+        echo "════════════════════════════════"
+        if [ -f "arch/arm64/boot/Image" ]; then
+          echo "✅ SUCCESS: Image"
+          ls -lh arch/arm64/boot/Image
+        elif [ -f "arch/arm64/boot/Image.gz" ]; then
+          echo "✅ SUCCESS: Image.gz"
+          ls -lh arch/arm64/boot/Image.gz
+        else
+          echo "❌ FAILED: No kernel image found!"
+          tail -80 ../build.log
+          exit 1
+        fi
+        echo "════════════════════════════════"
+
+    # ════════════════════════════════════════════
+    # 🔟 تحزيم مع AnyKernel3
+    # ════════════════════════════════════════════
+    - name: 📦 Package with AnyKernel3
+      run: |
+        git clone --depth=1 https://github.com/osm0sis/AnyKernel3 AnyKernel3
+
+        # نسخ الكيرنل
+        if [ -f "kernel/arch/arm64/boot/Image" ]; then
+          cp kernel/arch/arm64/boot/Image AnyKernel3/
+        elif [ -f "kernel/arch/arm64/boot/Image.gz" ]; then
+          cp kernel/arch/arm64/boot/Image.gz AnyKernel3/
+        fi
+
+        # نسخ DTB
+        find kernel/arch/arm64/boot/dts -name "*.dtb" 2>/dev/null | \
+          head -1 | xargs -I{} cp {} AnyKernel3/dtb 2>/dev/null || true
+
+        # اسم الملف
+        KSU_TAG=""
+        [ "${{ github.event.inputs.enable_ksu }}" != "false" ] && KSU_TAG="-KSU"
+
+        DATE=$(date +%Y%m%d-%H%M)
+        ZIP_NAME="SM-A356E-Kernel${KSU_TAG}-Android15-${DATE}.zip"
+
+        cd AnyKernel3
+        zip -r9 "../${ZIP_NAME}" . -x ".git/*" "README.md"
+        cd ..
+
+        echo "✅ ZIP ready: ${ZIP_NAME}"
+        echo "ZIP_NAME=${ZIP_NAME}" >> $GITHUB_ENV
+        ls -lh "${ZIP_NAME}"
+
+    # ════════════════════════════════════════════
+    # 1️⃣1️⃣ رفع الملفات
+    # ════════════════════════════════════════════
+    - name: ⬆️ Upload Kernel ZIP
+      uses: actions/upload-artifact@v3
+      with:
+        name: SM-A356E-Kernel
+        path: "*.zip"
+        retention-days: 30
+
+    - name: ⬆️ Upload Build Log
+      if: always()
+      uses: actions/upload-artifact@v3
+      with:
+        name: build-log
+        path: build.log
+        retention-days: 7
+
+    # ════════════════════════════════════════════
+    # 1️⃣2️⃣ ملخص
+    # ════════════════════════════════════════════
+    - name: 📊 Build Summary
+      if: success()
+      run: |
+        echo "════════════════════════════════════════"
+        echo "  ✅ BUILD SUCCESSFUL!"
+        echo "════════════════════════════════════════"
+        echo "  📱 Device  : Samsung SM-A356E"
+        echo "  🤖 Android : 15 (One UI 7.0)"
+        echo "  🐧 Kernel  : 5.15 (GKI 2.0)"
+        echo "  🔑 KernelSU: ${{ github.event.inputs.enable_ksu || 'true' }}"
+        echo "  🔓 No Knox : ${{ github.event.inputs.enable_nuke_rkp || 'true' }}"
+        echo "  📦 File    : ${{ env.ZIP_NAME }}"
+        echo "  📅 Date    : $(date)"
+        echo "════════════════════════════════════════"
+        echo "  👉 Actions → This Run → Artifacts"
+        echo "════════════════════════════════════════"
